@@ -1,0 +1,346 @@
+"""Fetch the latest two 10-Ks and store extracted sections plus search chunks."""
+
+import datetime as dt
+import logging
+import re
+from dataclasses import dataclass
+
+from bs4 import BeautifulSoup
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.db import SessionLocal, init_db
+from app.ingest.sec_client import SecClient
+from app.ingest.xbrl import _upsert_companies
+from app.models import Filing, FilingSection, SectionChunk
+
+logger = logging.getLogger(__name__)
+
+MIN_SECTION_CHARS = 5_000
+CHUNK_TARGET = 1_200
+CHUNK_OVERLAP = 200
+EXTRACTION_REGEX = "regex"
+EXTRACTION_FALLBACK = "fallback"
+
+_START_RISK = re.compile(r"(?im)^[ \t]{0,12}item\s+1a\b[\.\:\-\s]*risk\s+factors\b")
+_END_RISK = re.compile(r"(?im)^[ \t]{0,12}item\s+1b\b")
+_END_RISK_FALLBACK = re.compile(r"(?im)^[ \t]{0,12}item\s+2\b")
+_START_MDNA = re.compile(
+    r"(?im)^[ \t]{0,12}item\s+7\b[\.\:\-\s]*management(?:['\u2019]s)?\s+discussion\b"
+)
+_END_MDNA = re.compile(r"(?im)^[ \t]{0,12}item\s+7a\b")
+_END_MDNA_FALLBACK = re.compile(r"(?im)^[ \t]{0,12}item\s+8\b")
+
+
+@dataclass(frozen=True)
+class ExtractedSection:
+    item: str
+    text: str
+    extraction_method: str
+
+    @property
+    def char_count(self) -> int:
+        return len(self.text)
+
+
+_BLOCK_TAGS = {
+    "p",
+    "div",
+    "tr",
+    "td",
+    "th",
+    "li",
+    "br",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "table",
+    "section",
+    "article",
+    "blockquote",
+    "dt",
+    "dd",
+    "hr",
+}
+
+
+def html_to_text(html: str) -> str:
+    """Drop hidden inline XBRL and render the remaining document as text.
+
+    Inline tags are concatenated so a heading split across spans stays one line.
+    Block tags become line breaks, which keeps the table of contents short.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    text = _render(soup).replace("\xa0", " ").replace("\u200b", "")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    collapsed = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+    return collapsed.strip()
+
+
+def _render(node: object) -> str:
+    from bs4 import NavigableString, Tag
+
+    if isinstance(node, NavigableString):
+        return str(node)
+    if not isinstance(node, Tag) or not node.name:
+        return "".join(_render(child) for child in getattr(node, "children", []))
+    name = node.name.lower()
+    if name in {"script", "style"} or name == "ix:header" or name.endswith(":header"):
+        return ""
+    style = (node.attrs or {}).get("style")
+    if isinstance(style, list):
+        style = " ".join(style)
+    if isinstance(style, str) and re.search(r"display\s*:\s*none", style, re.I):
+        return ""
+    inner = "".join(_render(child) for child in node.children)
+    if name == "br" or name in _BLOCK_TAGS:
+        return f"\n{inner}\n"
+    return inner
+
+
+def extract_sections(
+    text: str,
+    *,
+    ticker: str = "",
+    fiscal_year: int | None = None,
+) -> list[ExtractedSection]:
+    """Keep the longest Item 1A and Item 7 span. Short spans fall back to the full document."""
+    label = ticker
+    if fiscal_year is not None:
+        label = f"{label} fy={fiscal_year}".strip()
+    prefix = f"{label} " if label else ""
+    sections: list[ExtractedSection] = []
+    failed = False
+    for item, start, ends in (
+        ("risk_factors", _START_RISK, (_END_RISK, _END_RISK_FALLBACK)),
+        ("mdna", _START_MDNA, (_END_MDNA, _END_MDNA_FALLBACK)),
+    ):
+        span = _longest_span(text, start, ends)
+        length = 0 if span is None else len(span)
+        if span is None or length < MIN_SECTION_CHARS:
+            logger.warning(
+                "%s%s extraction failed (chars=%s, minimum=%s); using full document",
+                prefix,
+                item,
+                length,
+                MIN_SECTION_CHARS,
+            )
+            failed = True
+            continue
+        logger.info("%spicked %s span chars=%s method=%s", prefix, item, length, EXTRACTION_REGEX)
+        sections.append(ExtractedSection(item, span, EXTRACTION_REGEX))
+    if failed:
+        sections.append(ExtractedSection("full_text", text, EXTRACTION_FALLBACK))
+    return sections
+
+
+def chunk_text(text: str, *, target: int = CHUNK_TARGET, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Pack paragraphs into chunks of about `target` characters, with a short overlap."""
+    pieces = _paragraph_pieces(text, target, overlap)
+    if not pieces:
+        return []
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        if not current:
+            current = piece
+            continue
+        combined = f"{current}\n\n{piece}"
+        if len(combined) <= target:
+            current = combined
+            continue
+        chunks.append(current)
+        tail = current[-overlap:].lstrip()
+        current = f"{tail}\n\n{piece}" if tail else piece
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def ingest_filings() -> None:
+    settings = get_settings()
+    init_db()
+    with SecClient(settings.sec_user_agent, timeout=120.0) as client, SessionLocal() as session:
+        _upsert_companies(session, settings.companies)
+        session.commit()
+        for company in settings.companies:
+            payload = client.submissions(company.cik)
+            filings = _latest_10ks(payload)
+            logger.info("%s: selected %s 10-K filings", company.ticker, len(filings))
+            for filing in filings:
+                html = client.filing_document(company.cik, filing["accession"], filing["primary_document"])
+                text = html_to_text(html)
+                sections = extract_sections(
+                    text,
+                    ticker=company.ticker,
+                    fiscal_year=filing["fiscal_year"],
+                )
+                _replace_filing(session, company.ticker, filing, sections)
+                session.commit()
+                for section in sections:
+                    logger.info(
+                        "%s fy=%s item=%s chars=%s extraction_method=%s",
+                        company.ticker,
+                        filing["fiscal_year"],
+                        section.item,
+                        section.char_count,
+                        section.extraction_method,
+                    )
+        _print_section_report(session, [company.ticker for company in settings.companies])
+
+
+def _latest_10ks(payload: dict) -> list[dict]:
+    recent = payload.get("filings", {}).get("recent", {})
+    forms = recent.get("form", [])
+    accessions = recent.get("accessionNumber", [])
+    filed_dates = recent.get("filingDate", [])
+    report_dates = recent.get("reportDate", [])
+    documents = recent.get("primaryDocument", [])
+    selected: list[dict] = []
+    for index, form in enumerate(forms):
+        if form != "10-K":
+            continue
+        report_date = report_dates[index] if index < len(report_dates) else ""
+        filed = filed_dates[index] if index < len(filed_dates) else ""
+        accession = accessions[index] if index < len(accessions) else ""
+        primary = documents[index] if index < len(documents) else ""
+        if not report_date or not filed or not accession or not primary:
+            logger.warning("skipping 10-K with missing metadata accession=%s", accession)
+            continue
+        period_end = dt.date.fromisoformat(report_date)
+        selected.append(
+            {
+                "accession": accession,
+                "form": "10-K",
+                "fiscal_year": period_end.year,
+                "period_end": period_end,
+                "filed": dt.date.fromisoformat(filed),
+                "primary_document": primary,
+            }
+        )
+        if len(selected) == 2:
+            break
+    return selected
+
+
+def _replace_filing(session: Session, ticker: str, filing: dict, sections: list[ExtractedSection]) -> None:
+    url = _document_url(ticker, filing)
+    existing = session.scalar(select(Filing).where(Filing.accession == filing["accession"]))
+    if existing is None:
+        row = Filing(
+            ticker=ticker,
+            accession=filing["accession"],
+            form=filing["form"],
+            fiscal_year=filing["fiscal_year"],
+            period_end=filing["period_end"],
+            filed=filing["filed"],
+            url=url,
+        )
+        session.add(row)
+        session.flush()
+    else:
+        existing.ticker = ticker
+        existing.form = filing["form"]
+        existing.fiscal_year = filing["fiscal_year"]
+        existing.period_end = filing["period_end"]
+        existing.filed = filing["filed"]
+        existing.url = url
+        row = existing
+        section_ids = list(
+            session.scalars(select(FilingSection.id).where(FilingSection.filing_id == row.id)).all()
+        )
+        if section_ids:
+            session.execute(delete(SectionChunk).where(SectionChunk.section_id.in_(section_ids)))
+            session.execute(delete(FilingSection).where(FilingSection.filing_id == row.id))
+        session.flush()
+
+    for section in sections:
+        stored = FilingSection(
+            filing_id=row.id,
+            item=section.item,
+            text=section.text,
+            char_count=section.char_count,
+            extraction_method=section.extraction_method,
+        )
+        session.add(stored)
+        session.flush()
+        for ordinal, chunk in enumerate(chunk_text(section.text)):
+            session.add(SectionChunk(section_id=stored.id, ordinal=ordinal, text=chunk))
+
+
+def _document_url(ticker: str, filing: dict) -> str:
+    settings = get_settings()
+    company = next(item for item in settings.companies if item.ticker == ticker)
+    cik_int = str(int(company.cik))
+    accession = filing["accession"].replace("-", "")
+    return (
+        "https://www.sec.gov/Archives/edgar/data/"
+        f"{cik_int}/{accession}/{filing['primary_document']}"
+    )
+
+
+def _print_section_report(session: Session, tickers: list[str]) -> None:
+    rows = session.execute(
+        select(
+            Filing.ticker,
+            Filing.fiscal_year,
+            Filing.accession,
+            FilingSection.item,
+            FilingSection.char_count,
+            FilingSection.extraction_method,
+        )
+        .join(FilingSection, FilingSection.filing_id == Filing.id)
+        .where(Filing.ticker.in_(tickers))
+        .order_by(Filing.ticker, Filing.fiscal_year.desc(), FilingSection.item)
+    ).all()
+    headers = ("ticker", "fiscal_year", "accession", "item", "char_count", "extraction_method")
+    table = [
+        (row.ticker, str(row.fiscal_year), row.accession, row.item, str(row.char_count), row.extraction_method)
+        for row in rows
+    ]
+    widths = [
+        max([len(header), *(len(record[index]) for record in table)] or [len(header)])
+        for index, header in enumerate(headers)
+    ]
+    print(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    print("-+-".join("-" * width for width in widths))
+    for record in table:
+        marker = " FALLBACK" if record[-1] == EXTRACTION_FALLBACK else ""
+        print(" | ".join(record[index].ljust(widths[index]) for index in range(len(headers))) + marker)
+
+
+def _longest_span(text: str, start_re: re.Pattern[str], end_patterns: tuple[re.Pattern[str], ...]) -> str | None:
+    spans: list[str] = []
+    for match in start_re.finditer(text):
+        end_at: int | None = None
+        for pattern in end_patterns:
+            end = pattern.search(text, match.end())
+            if end is not None:
+                end_at = end.start()
+                break
+        if end_at is None or end_at <= match.start():
+            continue
+        spans.append(text[match.start() : end_at].strip())
+    if not spans:
+        return None
+    return max(spans, key=len)
+
+
+def _paragraph_pieces(text: str, target: int, overlap: int) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    pieces: list[str] = []
+    for paragraph in paragraphs:
+        if len(paragraph) <= target:
+            pieces.append(paragraph)
+            continue
+        start = 0
+        while start < len(paragraph):
+            pieces.append(paragraph[start : start + target])
+            if start + target >= len(paragraph):
+                break
+            start += target - overlap
+    return pieces

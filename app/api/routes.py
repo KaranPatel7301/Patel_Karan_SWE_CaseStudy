@@ -31,10 +31,13 @@ from app.schemas import (
     PriceOut,
     PricesResponse,
     RowCounts,
+    SearchHit,
+    SearchResponse,
     UnavailableRowOut,
     ValuationMetricOut,
     ValuationResponse,
 )
+from app.services.search import search_chunks
 from app.services.metrics import (
     ANNUAL_METRICS,
     CompareRow,
@@ -207,6 +210,37 @@ def prices(
             PriceOut(date=row.date, close=row.close, adj_close=row.adj_close, volume=row.volume)
             for row in rows
         ],
+    )
+
+
+_SECTION_ITEMS = {"risk_factors", "mdna", "full_text"}
+
+
+@router.get("/companies/{ticker}/filings/search", response_model=SearchResponse)
+def search_filings(
+    ticker: str,
+    q: str = Query(min_length=1),
+    item: str | None = None,
+    fiscal_year: int | None = None,
+) -> SearchResponse:
+    if item is not None and item not in _SECTION_ITEMS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown item: {item}. Expected one of: {', '.join(sorted(_SECTION_ITEMS))}",
+        )
+    company = _require_company(ticker)
+    with SessionLocal() as session:
+        hits = search_chunks(
+            session,
+            ticker=company.ticker,
+            query=q,
+            item=item,
+            fiscal_year=fiscal_year,
+        )
+    return SearchResponse(
+        ticker=company.ticker,
+        query=q,
+        hits=[SearchHit(**hit) for hit in hits],
     )
 
 

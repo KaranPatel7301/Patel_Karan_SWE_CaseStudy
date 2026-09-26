@@ -7,3 +7,4 @@ PyYAML>=6.0
 httpx>=0.28
 pytest>=8.3
 yfinance>=0.2.50
+beautifulsoup4>=4.12

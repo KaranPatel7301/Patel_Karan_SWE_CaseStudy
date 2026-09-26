@@ -18,19 +18,23 @@ def main(argv: list[str] | None = None) -> None:
         ingest_xbrl()
         return
     if args.command == "filings":
-        raise SystemExit("filings ingestion is not implemented yet")
+        from app.ingest.filings import ingest_filings
+
+        ingest_filings()
+        return
     if args.command == "prices":
         from app.ingest.prices import ingest_prices
 
         ingest_prices()
         return
 
+    from app.ingest.filings import ingest_filings
     from app.ingest.prices import ingest_prices
     from app.ingest.xbrl import ingest_xbrl
 
     ingest_xbrl()
     ingest_prices()
-    raise SystemExit("filings ingestion is not implemented yet")
+    ingest_filings()
 
 
 if __name__ == "__main__":

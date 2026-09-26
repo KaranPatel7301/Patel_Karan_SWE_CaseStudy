@@ -119,3 +119,23 @@ class CompareResponse(BaseModel):
     metric: str
     ranked: list[CompareRowOut]
     unavailable: list[UnavailableRowOut]
+
+
+class SearchHit(BaseModel):
+    chunk_id: int
+    ordinal: int
+    text: str
+    rank: float
+    item: str
+    extraction_method: str
+    accession: str
+    form: str
+    fiscal_year: int
+    period_end: date
+    filed: date
+
+
+class SearchResponse(BaseModel):
+    ticker: str
+    query: str
+    hits: list[SearchHit]
