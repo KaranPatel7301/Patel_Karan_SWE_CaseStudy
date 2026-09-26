@@ -1,14 +1,23 @@
 """Agent loop with a mocked LLM: tool dispatch and the empty-sources guardrail."""
 
+import datetime as dt
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 from openai import OpenAI
 
-from app.agent.loop import chat_completions_url, openai_base_url, run_agent
+from app.agent.loop import (
+    _valuation_citation_error,
+    chat_completions_url,
+    openai_base_url,
+    run_agent,
+)
+from app.agent.tools import _price_citation, tool_schemas
 from app.main import app
-from app.schemas import AskResponse
+from app.schemas import AskResponse, FinalAnswer, ToolTraceEntry
 
 
 def _completion(*calls: SimpleNamespace) -> SimpleNamespace:
@@ -182,6 +191,68 @@ def test_rate_limit_retries_with_backoff() -> None:
     assert sleeps == [1.0]
     assert result.declined is True
     assert result.answer.startswith("Declined. Forward estimates")
+
+
+def test_price_source_cites_the_close_beside_the_eps_fact() -> None:
+    price = _price_citation("AAPL", Decimal("341.07"), dt.date(2026, 9, 25))
+    assert price is not None
+    assert price["type"] == "price"
+    assert price["ticker"] == "AAPL"
+    assert price["date"] == "2026-09-25"
+    assert price["close"] == pytest.approx(341.07)
+    parsed = FinalAnswer.model_validate(
+        {
+            "answer": "Trailing P/E uses the stored close and diluted EPS.",
+            "declined": False,
+            "data_used": "numbers",
+            "sources": [
+                price,
+                {
+                    "type": "fact",
+                    "ticker": "AAPL",
+                    "concept": "eps_diluted",
+                    "fiscal_year": 2025,
+                    "period_end": "2025-09-27",
+                },
+            ],
+        }
+    )
+    assert parsed.sources[0].type == "price"
+    assert parsed.sources[0].close == pytest.approx(341.07)
+    assert parsed.sources[1].type == "fact"
+    assert parsed.sources[1].concept == "eps_diluted"
+    schema = next(
+        tool["function"]
+        for tool in tool_schemas()
+        if tool["function"]["name"] == "final_answer"
+    )
+    source_types = schema["parameters"]["properties"]["sources"]["items"]["properties"]["type"]["enum"]
+    assert source_types == ["fact", "filing_chunk", "price"]
+
+
+def test_valuation_answer_without_a_price_source_is_rejected() -> None:
+    trace = [ToolTraceEntry(tool="get_valuation", args={"ticker": "AAPL"}, ok=True)]
+    eps_only = FinalAnswer.model_validate(
+        {
+            "answer": "The trailing P/E is 45.72.",
+            "declined": False,
+            "data_used": "numbers",
+            "sources": [_fact_source() | {"ticker": "AAPL", "concept": "eps_diluted"}],
+        }
+    )
+    assert _valuation_citation_error(trace, eps_only) is not None
+    both = FinalAnswer.model_validate(
+        {
+            "answer": "The trailing P/E is 45.72.",
+            "declined": False,
+            "data_used": "numbers",
+            "sources": [
+                {"type": "price", "ticker": "AAPL", "date": "2026-09-25", "close": 341.07},
+                _fact_source() | {"ticker": "AAPL", "concept": "eps_diluted"},
+            ],
+        }
+    )
+    assert _valuation_citation_error(trace, both) is None
 
 
 def test_base_url_with_or_without_slash_targets_chat_completions() -> None:

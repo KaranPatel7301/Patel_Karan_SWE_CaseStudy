@@ -251,7 +251,8 @@ Use a `final_answer` tool instead of `response_format` JSON schema because tool 
   "data_used": "numbers | text | both | none",
   "sources": [
     {"type": "fact", "ticker": "MSFT", "concept": "revenue", "fiscal_year": 2025, "period_end": "2025-06-30"},
-    {"type": "filing_chunk", "chunk_id": 123, "ticker": "MSFT", "item": "mdna", "filing_fiscal_year": 2025}
+    {"type": "filing_chunk", "chunk_id": 123, "ticker": "MSFT", "item": "mdna", "filing_fiscal_year": 2025},
+    {"type": "price", "ticker": "AAPL", "date": "2026-09-25", "close": 341.07}
   ],
   "tool_trace": [{"tool": "get_financials", "args": {}, "ok": true}]
 }

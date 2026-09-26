@@ -128,8 +128,16 @@ def _handle_calls(
         accepted: FinalAnswer | None = None
         for call in final_calls:
             parsed = _parse_final_answer(call, messages, trace)
-            if parsed is not None:
-                accepted = parsed
+            if parsed is None:
+                continue
+            citation_error = _valuation_citation_error(trace, parsed)
+            if citation_error is not None:
+                trace[-1] = ToolTraceEntry(tool="final_answer", args=trace[-1].args, ok=False)
+                messages.append(
+                    _tool_message(_call_id(call), "final_answer", {"error": citation_error})
+                )
+                continue
+            accepted = parsed
         if accepted is not None:
             return _response_from_final(accepted, trace)
         return None
@@ -199,6 +207,22 @@ def _execute_data_tool(
     logger.info("tool %s ok", name)
     trace.append(ToolTraceEntry(tool=name, args=args, ok=True))
     messages.append(_tool_message(_call_id(call), name, payload))
+
+
+def _valuation_citation_error(trace: list[ToolTraceEntry], final: FinalAnswer) -> str | None:
+    """Trailing P/E joins a stored close to annual EPS, so both sides must be cited."""
+    used_valuation = any(entry.tool == "get_valuation" and entry.ok for entry in trace)
+    if not used_valuation or final.declined:
+        return None
+    has_price = any(source.type == "price" for source in final.sources)
+    has_fact = any(source.type == "fact" for source in final.sources)
+    if has_price and has_fact:
+        return None
+    return (
+        "Cite both sides of the valuation join: a price source "
+        '{"type":"price","ticker","date","close"} and the eps_diluted or revenue fact. '
+        "Copy them from get_valuation sources."
+    )
 
 
 def _response_from_final(final: FinalAnswer, trace: list[ToolTraceEntry]) -> AskResponse:

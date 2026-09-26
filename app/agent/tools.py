@@ -1,6 +1,8 @@
 """Tool schemas and dispatch. Each tool calls the same services as the HTTP API."""
 
+import datetime as dt
 from collections import defaultdict
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -118,7 +120,7 @@ def tool_schemas() -> list[dict[str, Any]]:
         _function_tool(
             "get_valuation",
             "Trailing P/E and price to sales from the latest stored close, not a live quote. "
-            "The result includes price_date and fact citations.",
+            "sources lists both sides of the join: a price source and the eps_diluted or revenue fact.",
             {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -144,8 +146,9 @@ def tool_schemas() -> list[dict[str, Any]]:
         _function_tool(
             "diff_risk_factors",
             "Compare risk-factor headings in the latest 10-K with the prior 10-K. "
-            "added headings are new. reworded pairs are similar but not the same heading. "
-            "Unchanged headings are omitted. Deterministic; do not redo the match yourself.",
+            "added headings are new. reworded pairs changed wording and are not new headings; "
+            "report both texts and the score. Unchanged headings are omitted. "
+            "Deterministic; do not redo the match yourself.",
             {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
@@ -170,7 +173,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "type": {"type": "string", "enum": ["fact", "filing_chunk"]},
+                                "type": {"type": "string", "enum": ["fact", "filing_chunk", "price"]},
                                 "ticker": {"type": "string"},
                                 "concept": {"type": "string"},
                                 "fiscal_year": {"type": "integer"},
@@ -178,6 +181,8 @@ def tool_schemas() -> list[dict[str, Any]]:
                                 "chunk_id": {"type": "integer"},
                                 "item": {"type": "string"},
                                 "filing_fiscal_year": {"type": "integer"},
+                                "date": {"type": "string"},
+                                "close": {"type": "number"},
                             },
                             "required": ["type", "ticker"],
                         },
@@ -303,6 +308,9 @@ def _get_valuation(args: dict[str, Any]) -> dict[str, Any]:
     close = None if latest is None else latest.close
     price_date = None if latest is None else latest.date
     result = compute_valuation(facts, close=close, price_date=price_date)
+    price_source = _price_citation(company.ticker, close, price_date)
+    eps_source = _fact_citation(company.ticker, "eps_diluted", result.trailing_pe)
+    revenue_source = _fact_citation(company.ticker, "revenue", result.price_to_sales)
     return {
         "ticker": company.ticker,
         "price": None if result.price is None else float(result.price),
@@ -315,10 +323,7 @@ def _get_valuation(args: dict[str, Any]) -> dict[str, Any]:
         "shares_period_end": (
             None if result.shares_period_end is None else result.shares_period_end.isoformat()
         ),
-        "citations": {
-            "trailing_pe": _fact_citation(company.ticker, "eps_diluted", result.trailing_pe),
-            "price_to_sales": _fact_citation(company.ticker, "revenue", result.price_to_sales),
-        },
+        "sources": [source for source in (price_source, eps_source, revenue_source) if source],
     }
 
 
@@ -390,6 +395,10 @@ def _diff_risk_factors(args: dict[str, Any]) -> dict[str, Any]:
             {"latest": item.latest, "prior": item.prior, "score": item.score}
             for item in diff.reworded
         ],
+        "note": (
+            "added headings are new. reworded pairs are the same risk with different wording, "
+            "not new risks. removed headings were dropped."
+        ),
     }
 
 
@@ -481,6 +490,21 @@ def _valuation_field(metric: ValuationMetric) -> dict[str, Any]:
         "reason": metric.reason,
         "fiscal_year": metric.fiscal_year,
         "period_end": None if metric.period_end is None else metric.period_end.isoformat(),
+    }
+
+
+def _price_citation(
+    ticker: str,
+    close: Decimal | None,
+    price_date: dt.date | None,
+) -> dict[str, Any] | None:
+    if close is None or price_date is None:
+        return None
+    return {
+        "type": "price",
+        "ticker": ticker,
+        "date": price_date.isoformat(),
+        "close": float(close),
     }
 
 

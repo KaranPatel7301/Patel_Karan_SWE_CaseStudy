@@ -157,7 +157,14 @@ class FilingChunkSource(BaseModel):
     filing_fiscal_year: int
 
 
-Source = Annotated[FactSource | FilingChunkSource, Field(discriminator="type")]
+class PriceSource(BaseModel):
+    type: Literal["price"]
+    ticker: str
+    date: date
+    close: float
+
+
+Source = Annotated[FactSource | FilingChunkSource | PriceSource, Field(discriminator="type")]
 
 
 class ToolTraceEntry(BaseModel):
