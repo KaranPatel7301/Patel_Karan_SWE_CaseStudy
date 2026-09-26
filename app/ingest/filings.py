@@ -13,11 +13,13 @@ from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.ingest.sec_client import SecClient
 from app.ingest.xbrl import _upsert_companies
-from app.models import Filing, FilingSection, SectionChunk
+from app.models import Filing, FilingSection, RiskHeading, SectionChunk
 
 logger = logging.getLogger(__name__)
 
 MIN_SECTION_CHARS = 5_000
+MIN_HEADING_CHARS = 40
+MAX_HEADING_CHARS = 400
 CHUNK_TARGET = 1_200
 CHUNK_OVERLAP = 200
 EXTRACTION_REGEX = "regex"
@@ -57,6 +59,9 @@ class ExtractedSection:
     def char_count(self) -> int:
         return len(self.text)
 
+
+_HEADING_BLOCKS = {"p", "div", "li", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6"}
+_EMPHASIS_TAGS = {"b", "strong", "i", "em"}
 
 _BLOCK_TAGS = {
     "p",
@@ -216,7 +221,15 @@ def ingest_filings() -> None:
                     ticker=company.ticker,
                     fiscal_year=filing["fiscal_year"],
                 )
-                _replace_filing(session, company.ticker, filing, sections)
+                risk_text = next((section.text for section in sections if section.item == "risk_factors"), "")
+                headings = extract_risk_headings(html, risk_text)
+                logger.info(
+                    "%s fy=%s risk_headings=%s",
+                    company.ticker,
+                    filing["fiscal_year"],
+                    len(headings),
+                )
+                _replace_filing(session, company.ticker, filing, sections, headings)
                 session.commit()
                 for section in sections:
                     logger.info(
@@ -264,7 +277,67 @@ def _latest_10ks(payload: dict) -> list[dict]:
     return selected
 
 
-def _replace_filing(session: Session, ticker: str, filing: dict, sections: list[ExtractedSection]) -> None:
+def extract_risk_headings(html: str, risk_text: str) -> list[str]:
+    """Bold or italic risk-factor paragraphs, 40 to 400 characters, in document order."""
+    if not risk_text.strip():
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    risk_norm = _normalize_ws(risk_text)
+    candidates: list[tuple[object, str]] = []
+    for tag in soup.find_all(list(_HEADING_BLOCKS)):
+        if _is_hidden(tag):
+            continue
+        if not _block_text_is_emphasized(tag):
+            continue
+        heading = _normalize_ws(tag.get_text(" ", strip=True))
+        if not (MIN_HEADING_CHARS <= len(heading) <= MAX_HEADING_CHARS):
+            continue
+        if heading not in risk_norm:
+            continue
+        candidates.append((tag, heading))
+    kept: list[tuple[object, str]] = []
+    kept_ids: list[int] = []
+    for tag, heading in candidates:
+        if any(id(parent) in kept_ids for parent in getattr(tag, "parents", [])):
+            continue
+        kept_ids.append(id(tag))
+        kept.append((tag, heading))
+    return _merge_wrapped_headings(kept)
+
+
+def _merge_wrapped_headings(parts: list[tuple[object, str]]) -> list[str]:
+    """Join sibling blocks that continue a wrapped sentence, then drop runs over 400 characters."""
+    merged: list[tuple[object, str]] = []
+    for tag, heading in parts:
+        previous = merged[-1] if merged else None
+        continues = (
+            previous is not None
+            and getattr(tag, "parent", None) is getattr(previous[0], "parent", None)
+            and _continues_sentence(heading)
+        )
+        if continues and previous is not None:
+            merged[-1] = (tag, f"{previous[1]} {heading}")
+            continue
+        merged.append((tag, heading))
+    return [
+        heading
+        for _tag, heading in merged
+        if MIN_HEADING_CHARS <= len(heading) <= MAX_HEADING_CHARS
+    ]
+
+
+def _continues_sentence(heading: str) -> bool:
+    stripped = heading.lstrip("•-–— ")
+    return bool(stripped) and stripped[0].islower()
+
+
+def _replace_filing(
+    session: Session,
+    ticker: str,
+    filing: dict,
+    sections: list[ExtractedSection],
+    headings: list[str],
+) -> None:
     url = _document_url(ticker, filing)
     existing = session.scalar(select(Filing).where(Filing.accession == filing["accession"]))
     if existing is None:
@@ -293,6 +366,7 @@ def _replace_filing(session: Session, ticker: str, filing: dict, sections: list[
         if section_ids:
             session.execute(delete(SectionChunk).where(SectionChunk.section_id.in_(section_ids)))
             session.execute(delete(FilingSection).where(FilingSection.filing_id == row.id))
+        session.execute(delete(RiskHeading).where(RiskHeading.filing_id == row.id))
         session.flush()
 
     for section in sections:
@@ -307,6 +381,8 @@ def _replace_filing(session: Session, ticker: str, filing: dict, sections: list[
         session.flush()
         for ordinal, chunk in enumerate(chunk_text(section.text)):
             session.add(SectionChunk(section_id=stored.id, ordinal=ordinal, text=chunk))
+    for ordinal, heading in enumerate(headings):
+        session.add(RiskHeading(filing_id=row.id, ordinal=ordinal, heading=heading))
 
 
 def _document_url(ticker: str, filing: dict) -> str:
@@ -394,6 +470,66 @@ def _longest_span(text: str, start_re: re.Pattern[str], end_patterns: tuple[re.P
     if not spans:
         return None
     return max(spans, key=len)
+
+
+def _normalize_ws(text: str) -> str:
+    cleaned = text.replace("\xa0", " ").replace("\u200b", "")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _tag_style(tag: object) -> str:
+    attrs = getattr(tag, "attrs", None) or {}
+    style = attrs.get("style")
+    if isinstance(style, list):
+        return " ".join(style)
+    return style or ""
+
+
+def _is_hidden(tag: object) -> bool:
+    current = tag
+    while current is not None and getattr(current, "name", None):
+        name = current.name.lower()
+        if name in {"script", "style"} or name == "ix:header" or name.endswith(":header"):
+            return True
+        if re.search(r"display\s*:\s*none", _tag_style(current), re.I):
+            return True
+        parent = getattr(current, "parent", None)
+        current = parent if getattr(parent, "name", None) else None
+    return False
+
+
+def _is_emphasis(tag: object) -> bool:
+    name = (getattr(tag, "name", None) or "").lower()
+    if name in _EMPHASIS_TAGS:
+        return True
+    style = _tag_style(tag)
+    if re.search(r"font-weight\s*:\s*(?:700|bold)\b", style, re.I):
+        return True
+    return bool(re.search(r"font-style\s*:\s*italic\b", style, re.I))
+
+
+def _block_text_is_emphasized(tag: object) -> bool:
+    from bs4 import NavigableString, Tag
+
+    if not isinstance(tag, Tag):
+        return False
+    if _is_emphasis(tag):
+        return True
+    saw_text = False
+    for child in tag.descendants:
+        if not isinstance(child, NavigableString) or not str(child).strip():
+            continue
+        saw_text = True
+        parent = child.parent
+        emphasized = False
+        while parent is not None and parent is not tag:
+            if isinstance(parent, Tag) and _is_emphasis(parent):
+                emphasized = True
+                break
+            parent = parent.parent
+        if not emphasized:
+            return False
+    return saw_text
 
 
 def _paragraph_pieces(text: str, target: int, overlap: int) -> list[str]:
