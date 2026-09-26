@@ -16,6 +16,29 @@ from app.schemas import AskResponse, FinalAnswer, ToolTraceEntry
 
 logger = logging.getLogger(__name__)
 
+_CHAT_COMPLETIONS_PATH = "/chat/completions"
+
+
+class ProviderResponseError(Exception):
+    """The provider HTTP body was not JSON."""
+
+    def __init__(self, status_code: int, body: str) -> None:
+        self.status_code = status_code
+        self.body = body[:500]
+        super().__init__(f"HTTP {status_code}: {self.body}")
+
+
+def chat_completions_url(base_url: str) -> str:
+    """Join LLM_BASE_URL to /chat/completions. A trailing slash on the base is optional."""
+    return base_url.strip().rstrip("/") + _CHAT_COMPLETIONS_PATH
+
+
+def openai_base_url(base_url: str) -> str:
+    """Base URL for the OpenAI client, which appends chat/completions itself."""
+    endpoint = chat_completions_url(base_url)
+    return endpoint[: -len("chat/completions")]
+
+
 UNGROUNDED_DECLINE = (
     "Declined because the answer had no supporting sources. "
     "An answer with no supporting data is not returned."
@@ -37,7 +60,10 @@ def run_agent(
 ) -> AskResponse:
     settings = get_settings()
     limit = settings.llm_max_tool_iterations if max_iterations is None else max_iterations
-    llm = client or OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
+    llm = client or OpenAI(
+        base_url=openai_base_url(settings.llm_base_url),
+        api_key=settings.llm_api_key,
+    )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
@@ -228,19 +254,35 @@ def _request(
         response = client.chat.completions.create(**kwargs)
         message = response.choices[0].message
         return message, _assistant_message(message)
-    # Keep the provider message intact, including Gemini thought signatures.
     raw = raw_api.create(**kwargs)
+    # Replay the raw assistant message instead of the SDK object. Gemini 3
+    # returns a thought_signature at choices[0].message.extra_content.google
+    # and rejects the next tool-call turn if that field is missing. Providers
+    # that omit extra_content still return a normal message; it is forwarded
+    # unchanged.
+    body = _raw_text(raw)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ProviderResponseError(_http_status(raw), body) from exc
     parsed = raw.parse()
-    payload = json.loads(_raw_text(raw))
-    choices = payload.get("choices") or []
+    choices = payload.get("choices") if isinstance(payload, dict) else None
     if not choices:
         raise RuntimeError("LLM returned no choices")
     message_dict = dict(choices[0]["message"])
-    if message_dict.get("role") == "model":
-        message_dict["role"] = "assistant"
-    else:
-        message_dict["role"] = "assistant"
+    message_dict["role"] = "assistant"
     return parsed.choices[0].message, message_dict
+
+
+def _http_status(raw: Any) -> int:
+    http_response = getattr(raw, "http_response", None)
+    status = getattr(http_response, "status_code", None)
+    if isinstance(status, int):
+        return status
+    status = getattr(raw, "status_code", None)
+    if isinstance(status, int):
+        return status
+    return 0
 
 
 def _raw_text(raw: Any) -> str:

@@ -7,7 +7,7 @@ from openai import APIStatusError
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.agent.loop import run_agent
+from app.agent.loop import ProviderResponseError, run_agent
 from app.config import CompanyConfig, get_settings
 from app.db import SessionLocal
 from app.models import (
@@ -252,6 +252,9 @@ def search_filings(
 def ask(body: AskRequest) -> AskResponse:
     try:
         return run_agent(body.question)
+    except ProviderResponseError as exc:
+        logger.error("LLM response was not JSON: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except APIStatusError as exc:
         logger.error("LLM request failed: %s", exc)
         raise HTTPException(status_code=502, detail=_llm_error_detail(exc)) from exc
