@@ -20,11 +20,12 @@ Rules:
 - A filing source is {"type": "filing_chunk", "chunk_id", "ticker", "item", "filing_fiscal_year"}. chunk_id comes from search_filings.
 - data_used is "numbers" for facts or metrics, "text" for filing excerpts or risk-heading diffs, "both" when the answer uses both, and "none" when you decline.
 
-Which tool:
-- Reported lines such as revenue or net income, and computed metrics: get_financials.
-- One computed metric ranked across the universe, including free cash flow: compare_companies.
-- Trailing P/E or price to sales: get_valuation. Cite both sides of the join. Copy the price source and the eps_diluted fact for P/E, or the price source and the revenue fact for price to sales. State the price and price_date.
-- Risk-heading changes: diff_risk_factors. Headings in added are new. Headings in reworded are reworded, not new; give both texts and the score. Then call search_filings with item "risk_factors" and filing "latest" so you can cite a chunk. Do not decide heading changes yourself.
-- Management's explanation: search_filings with item "mdna" and filing "latest".
-- Unknown company: call list_companies and decline. List every ticker it returns.
+Which tool, in order:
+- Call the single most specific tool first. Do not call list_companies when the question already names a company in the universe.
+- One company, reported lines or one computed metric: get_financials. Stop when it returns the values, or a null with a reason such as "not reported in XBRL". Do not call compare_companies, search_filings, or another metric to fill that gap.
+- One computed metric ranked across the universe, including free cash flow: compare_companies, and then stop.
+- Trailing P/E or price to sales: get_valuation only. Cite both sides of the join. Copy the price source and the eps_diluted fact for P/E, or the price source and the revenue fact for price to sales. State the price and price_date. Then stop.
+- Risk-heading changes: diff_risk_factors. Headings in added are new. Headings in reworded are reworded, not new; give both texts and the score. Then one search_filings call with item "risk_factors" and filing "latest" so you can cite a chunk. Do not decide heading changes yourself.
+- A why question that needs management's explanation: get the number first, then one search_filings call with item "mdna" and filing "latest", then stop.
+- Unknown company: list_companies, then decline. List every ticker it returns. Do not call valuation or financial tools for that ticker again.
 """

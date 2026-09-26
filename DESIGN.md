@@ -1,0 +1,31 @@
+# Design
+
+The service is a FastAPI process in front of Postgres. Ingestion is a separate command, `python -m app.ingest.cli`, run with `make ingest`. A request never calls the SEC or Yahoo. It reads tables that were filled earlier: companies, annual financial facts, daily prices, two 10-Ks per company, extracted sections, paragraph chunks, and risk-factor headings. The company list lives in `companies.yaml`, so tickers and CIKs are configuration.
+
+That split exists because filing retrieval is slow, rate-limited, and occasionally wrong, while an answer has to be stable enough to cite. Serving from a snapshot also means a fresh volume can boot from `seed/seed.sql.gz` with no network calls to EDGAR. The API computes margins, growth, free cash flow, and valuation in Python at read time from the stored facts and the latest close. The model is not asked to do arithmetic.
+
+## Facts, periods, and the price join
+
+Company facts are normalized from XBRL with a fixed tag list per concept, in priority order. Fallback is chosen per period end, not once per company, because filers switch tags. Apple's revenue tag is the example that motivated that rule. Only 10-K facts are kept, and only durations of 350 to 380 days, so quarters drop out. `fiscal_year` is `period_end.year`. The XBRL `fy` field is the year of the filing, so a prior-year comparative inside a newer 10-K would be mislabeled if `fy` were stored.
+
+When the same ticker, concept, and period end appear more than once, the row from the latest `filed` date wins. That is how restatements and split-adjusted EPS land in the table, including NVIDIA's 2024 10-for-1 split and Alphabet's 2022 20-for-1 split. Gross profit may be derived as revenue minus cost of revenue. Operating income is never derived. Capex accepts `PaymentsToAcquireProductiveAssets` when the property-plant tag is absent, which is the tag NVIDIA actually uses. Each row records `source_tag`.
+
+Trailing P/E is the latest `close` divided by the latest annual diluted EPS. `adj_close` is also split-adjusted, and it is dividend-adjusted, so it is stored and not used for the multiple. The agent response has to cite both sides of that join: a `price` source with ticker, date, and close, and a `fact` source for `eps_diluted` with fiscal year and period end. Price to sales is close times shares outstanding, divided by annual revenue. Alphabet's stored share count is the combined common-stock figure across classes, about 12.1 billion at 2025 year end, and the price is the GOOGL close, so that multiple is a cross-class approximation.
+
+## Filing text
+
+Each 10-K is fetched, stripped of hidden inline XBRL, and turned into text. Risk factors and MD&A are located with case-insensitive item regexes. The table of contents usually matches first, so every candidate span is kept and the longest one wins. MD&A then has a second step. If the Item 7 span is under 5,000 characters, the extractor searches for the heading "Management's Discussion and Analysis" outside the table of contents and the Item 7 cross-reference, and cuts at the next major heading. Eaton's 2024 and 2025 MD&A both took that heading path, at about 66,000 and 74,000 characters. The other eight filings in the universe were long enough on the Item 7 regex. If risk factors or both MD&A attempts stay under 5,000 characters, the full document is stored as `full_text` and the failure is logged. That fallback is unused in the current snapshot.
+
+Sections are chunked to about 1,200 characters and indexed with a generated `tsvector` and a GIN index. Risk headings are bold, italic, or underlined lead-ins collected from the risk-factors HTML. The diff is `token_set_ratio` in Python: 85 or above is the same heading, leftovers paired at 60 or above are reworded, and the rest are added or removed. A heavy rewrite that scores under 60 is reported as a removal plus an addition. That is a known miss, and it is still better than asking the model to decide which headings changed.
+
+## Where the model sits
+
+Numbers, metrics, valuation, full-text search, and the risk-heading diff are deterministic. The model chooses a tool, reads JSON, and writes the sentence. It must finish by calling `final_answer`. If that call is not declined and `sources` is empty, the service replaces the answer with a decline. The same thing happens when the tool-call budget runs out. The prompt tells the model to call the most specific tool first and to stop when that tool returns the figure or an explicit null with a reason, so a missing Eaton operating margin stays "not reported in XBRL" instead of turning into a search for a substitute number.
+
+Postgres full-text search is the retrieval layer. Embeddings would add a model dependency on the query path and another artifact in the seed, for a corpus of a few thousand chunks where a keyword query against MD&A is enough.
+
+Gemini 3 returns a `thought_signature` on `choices[0].message.extra_content.google`. The next tool-calling turn is rejected if that field is dropped. The OpenAI SDK's parsed message does not keep the provider extension, so the loop reads the raw HTTP body and sends that assistant message back unchanged. A provider that omits `extra_content` still works, because the same path forwards an ordinary assistant message. If the body is not JSON, `/ask` returns 502 with the provider status and the first 500 characters of the body.
+
+## Limits and cuts
+
+The series is annual only, so a quarterly question is declined or answered with the latest annual figure labeled as annual. Eaton has no XBRL operating income, so operating margin is null with the reason "not reported in XBRL". Heading diffs miss heavy rewrites below the reword threshold. Alphabet price to sales uses total shares across classes. There is no scheduler, so the snapshot changes only when someone runs ingestion and regenerates the seed. There is no authentication, no frontend, and no vector index. Those were left out so the prototype could keep one database, one ingestion command, and a model that routes and summarizes without owning the numbers.
