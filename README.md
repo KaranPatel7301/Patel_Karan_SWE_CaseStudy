@@ -1,39 +1,92 @@
 # Fundamentals Tracker
 
-A small service that tracks NVDA, MSFT, AAPL, GOOGL, and ETN from SEC filings and stored prices, and answers questions over the numbers and the 10-K narrative.
+## Setup
 
-This project was built with Cursor. Each milestone was reviewed, tested, and verified against independent data.
+`.env` is gitignored. A fresh clone has `.env.example` only.
 
-## Run
+1. Clone the repo and enter it.
+
+```bash
+git clone https://github.com/KaranPatel7301/Patel_Karan_SWE_CaseStudy.git
+cd Patel_Karan_SWE_CaseStudy
+```
+
+2. Copy the example env file.
 
 ```bash
 cp .env.example .env
 ```
 
-Put a real key in `LLM_API_KEY`, set `LLM_BASE_URL` and `LLM_MODEL` for your provider, then:
+3. Open `.env` and fill in each variable.
+
+| Variable | Required? | What it is for | Example |
+|---|---|---|---|
+| `LLM_BASE_URL` | Required for `/ask` | OpenAI-compatible API root. The client strips a trailing slash and calls `{base}/chat/completions`. | `https://generativelanguage.googleapis.com/v1beta/openai/` |
+| `LLM_API_KEY` | Required for `/ask` | Bearer token for that endpoint. | `changeme` until you paste a real key |
+| `LLM_MODEL` | Required for `/ask` | Model name sent on each chat completion. | `gemini-3.8-flash` |
+| `SEC_USER_AGENT` | Only for `make ingest` | User-Agent on live SEC requests. The seeded service does not call the SEC. | `"Your Name your-email@example.com"` |
+| `DATABASE_URL` | Leave the default | Postgres URL for the API. It matches `docker-compose.yml`. | `postgresql+psycopg://tracker:tracker@db:5432/tracker` |
+| `LLM_MAX_TOOL_ITERATIONS` | Optional | Cap on tool-calling rounds. Hitting it returns a decline and the tool trace. | `6` |
+| `COMPANIES_PATH` | Optional | Path to the universe file, read inside the API container. | `companies.yaml` |
+
+The values above for `LLM_BASE_URL` and `LLM_MODEL` are what this project used: Google AI Studio, `gemini-3.8-flash`, via `https://generativelanguage.googleapis.com/v1beta/openai/`. To use another OpenAI-compatible proxy instead, set `LLM_BASE_URL` to that API root and `LLM_MODEL` to the model name. A trailing slash on the base URL is optional.
+
+4. Build and start in the background.
 
 ```bash
-docker compose up
+docker compose up -d --build
 ```
 
-The first start builds the API image and loads `seed/seed.sql.gz` into an empty Postgres volume. The API listens on port 8000. Ingestion is not required to serve the seeded snapshot.
+5. Wait about 15 seconds, then check health. The seeded database should report these row counts:
 
-## Environment
+```bash
+curl -sS http://localhost:8000/health
+```
 
-| Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | SQLAlchemy URL. Compose sets `postgresql+psycopg://tracker:tracker@db:5432/tracker` for the API. |
-| `SEC_USER_AGENT` | User-Agent sent on every SEC request during ingestion. SEC rejects requests without one. |
-| `LLM_BASE_URL` | OpenAI-compatible API root, for example `https://api.openai.com/v1` or `https://generativelanguage.googleapis.com/v1beta/openai/`. A trailing slash is optional. The client strips it and calls `{base}/chat/completions`. |
-| `LLM_API_KEY` | Bearer token for that endpoint. |
-| `LLM_MODEL` | Model name sent on each chat completion. |
-| `LLM_MAX_TOOL_ITERATIONS` | Cap on tool-calling rounds. The default is 6. Hitting the cap returns a decline and the tool trace. |
+```json
+{
+  "status": "ok",
+  "database": "up",
+  "row_counts": {
+    "companies": 5,
+    "financial_facts": 266,
+    "prices": 6275,
+    "filings": 10,
+    "filing_sections": 20,
+    "section_chunks": 1478,
+    "risk_headings": 284
+  },
+  "latest_price_date": "2026-09-25"
+}
+```
 
-To point at another OpenAI-compatible proxy, change `LLM_BASE_URL` and `LLM_MODEL`. Both `https://proxy.example/v1` and `https://proxy.example/v1/` resolve to the same chat-completions URL.
+Then ask one question. A successful call returns HTTP 200. For this question the answer should say operating margin was not reported in XBRL and should not invent a number.
+
+```bash
+curl -sS http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What was Eaton'\''s operating margin last year?"}'
+```
+
+6. The first boot on an empty volume loads `seed/seed.sql.gz` automatically, so no live SEC or Yahoo access is needed to run the service.
+
+## Troubleshooting
+
+Port 8000 is already in use. Another Compose stack is bound to it. From that other project directory, run `docker compose down`, then start this one again.
+
+`/ask` returns 502. Check `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` in `.env`. Compose reads that file when the API container is created, so recreate it after any edit:
+
+```bash
+docker compose up -d --force-recreate api
+```
+
+Start fresh. `docker compose down -v` deletes the database volume. The next `docker compose up -d --build` loads `seed/seed.sql.gz` again.
 
 ## Model
 
 Answers are produced with Google AI Studio, model `gemini-3.8-flash`, through the OpenAI-compatible endpoint `https://generativelanguage.googleapis.com/v1beta/openai/`.
+
+This project was built with Cursor. Each milestone was reviewed, tested, and verified against independent data.
 
 ## Ingestion and the seed
 
