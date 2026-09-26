@@ -3,9 +3,11 @@ import logging
 from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from openai import APIStatusError
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from app.agent.loop import run_agent
 from app.config import CompanyConfig, get_settings
 from app.db import SessionLocal
 from app.models import (
@@ -20,6 +22,8 @@ from app.models import (
 )
 from app.schemas import (
     AnnualMetricsOut,
+    AskRequest,
+    AskResponse,
     CompanyOut,
     CompareResponse,
     CompareRowOut,
@@ -244,6 +248,15 @@ def search_filings(
     )
 
 
+@router.post("/ask", response_model=AskResponse)
+def ask(body: AskRequest) -> AskResponse:
+    try:
+        return run_agent(body.question)
+    except APIStatusError as exc:
+        logger.error("LLM request failed: %s", exc)
+        raise HTTPException(status_code=502, detail=_llm_error_detail(exc)) from exc
+
+
 @router.get("/compare", response_model=CompareResponse)
 def compare(metric: str = Query(...)) -> CompareResponse:
     if metric not in ANNUAL_METRICS:
@@ -267,6 +280,18 @@ def compare(metric: str = Query(...)) -> CompareResponse:
             for row in unavailable
         ],
     )
+
+
+def _llm_error_detail(exc: APIStatusError) -> str:
+    body = exc.body
+    error: object = body
+    if isinstance(body, list) and body:
+        error = body[0]
+    if isinstance(error, dict):
+        nested = error.get("error", error)
+        if isinstance(nested, dict) and isinstance(nested.get("message"), str):
+            return nested["message"]
+    return "The language model request failed."
 
 
 def _require_company(ticker: str) -> CompanyConfig:

@@ -1,8 +1,8 @@
 from datetime import date
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, PlainSerializer
+from pydantic import BaseModel, Field, PlainSerializer, field_validator
 
 JsonDecimal = Annotated[
     Decimal,
@@ -139,3 +139,55 @@ class SearchResponse(BaseModel):
     ticker: str
     query: str
     hits: list[SearchHit]
+
+
+class FactSource(BaseModel):
+    type: Literal["fact"]
+    ticker: str
+    concept: str
+    fiscal_year: int
+    period_end: date
+
+
+class FilingChunkSource(BaseModel):
+    type: Literal["filing_chunk"]
+    chunk_id: int
+    ticker: str
+    item: str
+    filing_fiscal_year: int
+
+
+Source = Annotated[FactSource | FilingChunkSource, Field(discriminator="type")]
+
+
+class ToolTraceEntry(BaseModel):
+    tool: str
+    args: dict[str, Any]
+    ok: bool
+
+
+class AskRequest(BaseModel):
+    question: str
+
+    @field_validator("question")
+    @classmethod
+    def question_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("question must not be blank")
+        return stripped
+
+
+class FinalAnswer(BaseModel):
+    answer: str
+    sources: list[Source]
+    data_used: Literal["numbers", "text", "both", "none"]
+    declined: bool
+
+
+class AskResponse(BaseModel):
+    answer: str
+    declined: bool
+    data_used: Literal["numbers", "text", "both", "none"]
+    sources: list[Source]
+    tool_trace: list[ToolTraceEntry]
