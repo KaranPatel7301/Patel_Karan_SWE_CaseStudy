@@ -230,7 +230,7 @@ OpenAI-compatible chat completions with tool calling, configured from `LLM_BASE_
 - `compare_companies(metric: str)`
 - `get_valuation(ticker)`
 - `search_filings(ticker, query, item: risk_factors|mdna|any, filing: latest|prior|any, k: int = 5)`
-- `diff_risk_factors(ticker)`: fuzzy-matches latest vs prior headings (rapidfuzz `token_set_ratio`, threshold about 85) and returns added and removed headings. Deterministic, no LLM.
+- `diff_risk_factors(ticker)`: fuzzy-matches latest vs prior headings (rapidfuzz `token_set_ratio`). Pairs at 85 or above are the same heading. Remaining headings are paired one-to-one, highest score first, and pairs at 60 or above are returned as reworded with both texts and the score. Everything else is added or removed. Deterministic, no LLM.
 - `final_answer(answer, sources, data_used, declined)`: the model must end by calling this.
 
 Use a `final_answer` tool instead of `response_format` JSON schema because tool calling is more widely supported across proxied models.

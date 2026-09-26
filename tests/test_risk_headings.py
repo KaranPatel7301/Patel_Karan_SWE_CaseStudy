@@ -58,6 +58,28 @@ def test_diff_reports_added_and_removed_headings() -> None:
         "Risks related to demand for our products and services.",
         "An old litigation heading that was removed from the latest filing entirely.",
     ]
-    added, removed = diff_headings(latest, prior)
+    added, removed, reworded = diff_headings(latest, prior)
     assert added == ["A brand new supply-chain concentration risk that did not exist in the prior filing."]
     assert removed == ["An old litigation heading that was removed from the latest filing entirely."]
+    assert reworded == []
+
+
+def test_climate_weather_pair_is_reworded() -> None:
+    weather = (
+        "Weather disruptions and regulatory, market and social reactions to them "
+        "create uncertainties that could negatively impact our business."
+    )
+    climate = (
+        "The effects of climate change, including weather disruptions and regulatory/market reactions, "
+        "create uncertainties that could negatively impact our business."
+    )
+    added, removed, reworded = diff_headings(
+        [weather, "A brand new artificial intelligence risk that Eaton did not disclose last year."],
+        [climate, "An unrelated pension-plan heading that disappeared from the latest filing."],
+    )
+    assert added == ["A brand new artificial intelligence risk that Eaton did not disclose last year."]
+    assert removed == ["An unrelated pension-plan heading that disappeared from the latest filing."]
+    assert len(reworded) == 1
+    assert reworded[0].latest == weather
+    assert reworded[0].prior == climate
+    assert 60 <= reworded[0].score < 85

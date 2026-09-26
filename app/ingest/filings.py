@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 from bs4 import BeautifulSoup
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -240,7 +240,9 @@ def ingest_filings() -> None:
                         section.char_count,
                         section.extraction_method,
                     )
-        _print_section_report(session, [company.ticker for company in settings.companies])
+        tickers = [company.ticker for company in settings.companies]
+        _print_section_report(session, tickers)
+        _print_heading_counts(session, tickers)
 
 
 def _latest_10ks(payload: dict) -> list[dict]:
@@ -424,6 +426,20 @@ def _print_section_report(session: Session, tickers: list[str]) -> None:
     for record in table:
         marker = " FALLBACK" if record[-1] == EXTRACTION_FALLBACK else ""
         print(" | ".join(record[index].ljust(widths[index]) for index in range(len(headers))) + marker)
+
+
+def _print_heading_counts(session: Session, tickers: list[str]) -> None:
+    rows = session.execute(
+        select(Filing.ticker, Filing.fiscal_year, func.count(RiskHeading.id))
+        .outerjoin(RiskHeading, RiskHeading.filing_id == Filing.id)
+        .where(Filing.ticker.in_(tickers))
+        .group_by(Filing.ticker, Filing.fiscal_year)
+        .order_by(Filing.ticker, Filing.fiscal_year.desc())
+    ).all()
+    print("ticker | fiscal_year | heading_count")
+    print("-------+-------------+--------------")
+    for ticker, fiscal_year, count in rows:
+        print(f"{ticker:<6} | {fiscal_year:<11} | {count}")
 
 
 def _extract_mdna(text: str) -> ExtractedSection | None:
