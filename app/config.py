@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "postgresql+psycopg://tracker:tracker@db:5432/tracker"
-    sec_user_agent: str = "Karan <your-email@example.com>"
+    sec_user_agent: str = "Karan Patel your-email@example.com"
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = "changeme"
     llm_model: str = "changeme"
