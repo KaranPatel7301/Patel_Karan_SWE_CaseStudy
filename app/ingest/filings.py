@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 MIN_SECTION_CHARS = 5_000
 MIN_HEADING_CHARS = 40
+MIN_SUBHEADING_CHARS = 20
+MIN_CATEGORY_CHARS = 15
 MAX_HEADING_CHARS = 400
 CHUNK_TARGET = 1_200
 CHUNK_OVERLAP = 200
@@ -280,7 +282,7 @@ def _latest_10ks(payload: dict) -> list[dict]:
 
 
 def extract_risk_headings(html: str, risk_text: str) -> list[str]:
-    """Bold or italic risk-factor paragraphs, 40 to 400 characters, in document order."""
+    """Bold or italic risk headings, including a bold lead-in before regular body text."""
     if not risk_text.strip():
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -289,12 +291,8 @@ def extract_risk_headings(html: str, risk_text: str) -> list[str]:
     for tag in soup.find_all(list(_HEADING_BLOCKS)):
         if _is_hidden(tag):
             continue
-        if not _block_text_is_emphasized(tag):
-            continue
-        heading = _normalize_ws(tag.get_text(" ", strip=True))
-        if not (MIN_HEADING_CHARS <= len(heading) <= MAX_HEADING_CHARS):
-            continue
-        if heading not in risk_norm:
+        heading = _heading_for_block(tag, risk_text, risk_norm)
+        if heading is None:
             continue
         candidates.append((tag, heading))
     kept: list[tuple[object, str]] = []
@@ -321,11 +319,7 @@ def _merge_wrapped_headings(parts: list[tuple[object, str]]) -> list[str]:
             merged[-1] = (tag, f"{previous[1]} {heading}")
             continue
         merged.append((tag, heading))
-    return [
-        heading
-        for _tag, heading in merged
-        if MIN_HEADING_CHARS <= len(heading) <= MAX_HEADING_CHARS
-    ]
+    return [heading for _tag, heading in merged if len(heading) <= MAX_HEADING_CHARS]
 
 
 def _continues_sentence(heading: str) -> bool:
@@ -512,6 +506,141 @@ def _is_hidden(tag: object) -> bool:
         parent = getattr(current, "parent", None)
         current = parent if getattr(parent, "name", None) else None
     return False
+
+
+def _heading_for_block(tag: object, risk_text: str, risk_norm: str) -> str | None:
+    """A full emphasized paragraph, a bold lead-in, a short bold-italic subhead, or an underlined category."""
+    full = _normalize_ws(tag.get_text(" ", strip=True))
+    if _is_underlined_category(tag, full, risk_text):
+        return full
+    if _block_text_is_emphasized(tag):
+        if MIN_HEADING_CHARS <= len(full) <= MAX_HEADING_CHARS and full in risk_norm:
+            return full
+        if (
+            MIN_SUBHEADING_CHARS <= len(full) < MIN_HEADING_CHARS
+            and full in risk_norm
+            and _is_own_line(full, risk_text)
+            and _block_is_bold_and_italic(tag)
+        ):
+            return full
+        return None
+    if not _is_leaf_block(tag):
+        return None
+    lead = _leading_emphasis(tag)
+    if lead == full or not (MIN_HEADING_CHARS <= len(lead) <= MAX_HEADING_CHARS):
+        return None
+    if lead not in risk_norm:
+        return None
+    return lead
+
+
+def _is_leaf_block(tag: object) -> bool:
+    finder = getattr(tag, "find", None)
+    if finder is None:
+        return False
+    return finder(list(_HEADING_BLOCKS)) is None
+
+
+def _is_own_line(heading: str, risk_text: str) -> bool:
+    return any(_normalize_ws(line) == heading for line in risk_text.splitlines())
+
+
+def _leading_emphasis(tag: object) -> str:
+    from bs4 import NavigableString, Tag
+
+    if not isinstance(tag, Tag):
+        return ""
+    parts: list[str] = []
+    for child in tag.descendants:
+        if not isinstance(child, NavigableString) or not str(child).strip():
+            continue
+        if not _string_is_emphasized(child, tag):
+            break
+        parts.append(str(child))
+    return _normalize_ws(" ".join(parts))
+
+
+def _string_is_emphasized(node: object, stop: object) -> bool:
+    from bs4 import Tag
+
+    parent = getattr(node, "parent", None)
+    while isinstance(parent, Tag) and parent is not stop:
+        if _is_emphasis(parent):
+            return True
+        parent = parent.parent
+    return False
+
+
+def _block_is_bold_and_italic(tag: object) -> bool:
+    from bs4 import NavigableString, Tag
+
+    if not isinstance(tag, Tag):
+        return False
+    saw_text = False
+    for child in tag.descendants:
+        if not isinstance(child, NavigableString) or not str(child).strip():
+            continue
+        saw_text = True
+        if not (_string_has_style(child, tag, _is_bold) and _string_has_style(child, tag, _is_italic)):
+            return False
+    return saw_text
+
+
+def _is_underlined_category(tag: object, heading: str, risk_text: str) -> bool:
+    from bs4 import NavigableString, Tag
+
+    if not isinstance(tag, Tag):
+        return False
+    if not (MIN_CATEGORY_CHARS <= len(heading) <= MAX_HEADING_CHARS):
+        return False
+    if not _is_own_line(heading, risk_text) or not _mostly_uppercase(heading):
+        return False
+    saw_text = False
+    for child in tag.descendants:
+        if not isinstance(child, NavigableString) or not str(child).strip():
+            continue
+        saw_text = True
+        if not _string_has_style(child, tag, _is_underline):
+            return False
+    return saw_text
+
+
+def _mostly_uppercase(text: str) -> bool:
+    letters = [char for char in text if char.isalpha()]
+    if len(letters) < 8:
+        return False
+    return sum(char.isupper() for char in letters) / len(letters) >= 0.8
+
+
+def _string_has_style(node: object, stop: object, predicate) -> bool:
+    from bs4 import Tag
+
+    if predicate(stop):
+        return True
+    parent = getattr(node, "parent", None)
+    while isinstance(parent, Tag) and parent is not stop:
+        if predicate(parent):
+            return True
+        parent = parent.parent
+    return False
+
+
+def _is_bold(tag: object) -> bool:
+    name = (getattr(tag, "name", None) or "").lower()
+    if name in {"b", "strong"}:
+        return True
+    return bool(re.search(r"font-weight\s*:\s*(?:700|bold)\b", _tag_style(tag), re.I))
+
+
+def _is_italic(tag: object) -> bool:
+    name = (getattr(tag, "name", None) or "").lower()
+    if name in {"i", "em"}:
+        return True
+    return bool(re.search(r"font-style\s*:\s*italic\b", _tag_style(tag), re.I))
+
+
+def _is_underline(tag: object) -> bool:
+    return bool(re.search(r"text-decoration\s*:[^;]*underline", _tag_style(tag), re.I))
 
 
 def _is_emphasis(tag: object) -> bool:

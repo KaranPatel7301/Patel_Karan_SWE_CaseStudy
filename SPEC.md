@@ -176,7 +176,7 @@ Checkpoint: print a table of revenue, net income, and diluted EPS for all five c
    2. If that span is under 5,000 characters, search for the heading `MANAGEMENT'S DISCUSSION AND ANALYSIS` (case-insensitive). Use the occurrence that is not in the table of contents and not the Item 7 cross-reference, and extract until the next major heading such as `QUANTITATIVE AND QUALITATIVE DISCLOSURES`, `REPORT OF INDEPENDENT REGISTERED PUBLIC ACCOUNTING FIRM`, or the start of the financial statements. If that span is at least 5,000 characters, store it as `item = mdna` with `extraction_method = heading`.
    3. If both MD&A attempts are under 5,000 characters, or risk-factor extraction is under 5,000 characters, log the failure and store the full document text as `item = full_text` with `extraction_method = fallback`. `full_text` is only the last resort.
 6. Chunk by paragraph into roughly 1,200 characters with a small overlap.
-7. Risk headings: from the Risk Factors HTML, collect bold or italic paragraphs (`<b>`, `<strong>`, `font-weight:700|bold`, `font-style:italic`) between 40 and 400 characters. Store in order.
+7. Risk headings: from the Risk Factors HTML, collect bold or italic paragraphs (`<b>`, `<strong>`, `font-weight:700|bold`, `font-style:italic`) between 40 and 400 characters. When a paragraph starts with a bold or italic lead-in and the rest is regular text, keep the lead-in. Also keep bold-and-italic subheadings of at least 20 characters that stand on their own line, and underlined all-caps section headings. Store in order.
 
 ### Prices
 - `yfinance.download(tickers, period="5y", auto_adjust=False)` so both `close` and `adj_close` are stored.

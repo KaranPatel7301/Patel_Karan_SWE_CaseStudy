@@ -30,6 +30,34 @@ def test_extract_risk_headings_keeps_emphasized_paragraphs_in_the_section() -> N
     ]
 
 
+def test_bold_lead_in_is_kept_when_the_paragraph_body_is_regular() -> None:
+    html = """
+    <html><body>
+      <p>
+        <span style="font-weight:bold">We face risks related to intellectual property that may harm our operating results.</span>
+        <span>Protecting our intellectual property rights and combating unlicensed copying is difficult and ongoing.</span>
+      </p>
+      <p><span style="font-weight:bold;font-style:italic">Business model competition</span></p>
+      <p style="text-decoration:underline">STRATEGIC AND COMPETITIVE RISKS</p>
+      <p><span style="font-weight:bold">Activision Blizzard, Inc.</span></p>
+    </body></html>
+    """
+    risk = "\n".join(
+        [
+            "We face risks related to intellectual property that may harm our operating results. "
+            "Protecting our intellectual property rights and combating unlicensed copying is difficult and ongoing.",
+            "Business model competition",
+            "STRATEGIC AND COMPETITIVE RISKS",
+            "The acquisition of Activision Blizzard, Inc. remains subject to integration risk.",
+        ]
+    )
+    assert extract_risk_headings(html, risk) == [
+        "We face risks related to intellectual property that may harm our operating results.",
+        "Business model competition",
+        "STRATEGIC AND COMPETITIVE RISKS",
+    ]
+
+
 def test_wrapped_italic_intro_over_400_characters_is_not_a_heading() -> None:
     html = """
     <html><body>
