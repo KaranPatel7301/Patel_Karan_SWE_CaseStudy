@@ -63,6 +63,43 @@ def test_short_section_falls_back_to_full_text() -> None:
     assert by_item["full_text"].text == text
 
 
+def test_short_item_7_uses_the_narrative_heading() -> None:
+    toc = "\n".join(
+        [
+            "Item 7.",
+            "",
+            "Management's Discussion and Analysis of Financial Condition and Results of Operations",
+            "",
+            "Item 7A.",
+            "",
+            "Quantitative and Qualitative Disclosures about Market Risk",
+        ]
+    )
+    risk = _body("Item 1A. Risk Factors", 400) + "\n\nItem 1B. Unresolved Staff Comments\n"
+    stub = (
+        "Item 7. Management's Discussion and Analysis of Financial Condition and Results of Operations.\n\n"
+        "Information required by this Item is presented in "
+        "“Management's Discussion and Analysis of Financial Condition and Results of Operations” "
+        "of this Form 10-K.\n\n"
+        "Item 7A. Quantitative and Qualitative Disclosures about Market Risk.\n"
+    )
+    narrative = (
+        "MANAGEMENT\u2019S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS.\n\n"
+        + ("Revenue and margins are discussed in this narrative. " * 300)
+        + "\n\nREPORT OF INDEPENDENT REGISTERED PUBLIC ACCOUNTING FIRM\n\nOpinion on the statements.\n"
+    )
+    text = f"{toc}\n\n{risk}\n\n{stub}\n\n{narrative}"
+    sections = {section.item: section for section in extract_sections(text)}
+    assert "full_text" not in sections
+    assert sections["mdna"].extraction_method == "heading"
+    assert sections["mdna"].char_count >= 5_000
+    assert sections["mdna"].text.startswith("MANAGEMENT\u2019S DISCUSSION AND ANALYSIS")
+    assert "Revenue and margins are discussed in this narrative." in sections["mdna"].text
+    assert "Information required by this Item" not in sections["mdna"].text
+    assert "REPORT OF INDEPENDENT" not in sections["mdna"].text
+    assert "Quantitative and Qualitative Disclosures about Market Risk" not in sections["mdna"].text
+
+
 def test_mdna_end_falls_back_to_item_8() -> None:
     text = (
         "Item 1A. Risk Factors\n\n" + ("Risk. " * 900) + "\n\nItem 1B. Other\n\n"

@@ -171,7 +171,10 @@ Checkpoint: print a table of revenue, net income, and diluted EPS for all five c
    - Risk factors: from `Item 1A. Risk Factors` to `Item 1B` (fallback end: `Item 2`)
    - MD&A: from `Item 7. Management's Discussion` to `Item 7A` (fallback end: `Item 8`)
 4. The first match is usually the table of contents. Collect all candidate spans and keep the longest.
-5. Sanity check: a section under 5,000 characters is a failed extraction. Log it and fall back to storing the full document text as `item = full_text` with `extraction_method = fallback`.
+5. MD&A uses a three-step strategy:
+   1. Take the Item 7 span from step 3. If it is at least 5,000 characters, store it as `item = mdna` with `extraction_method = regex`.
+   2. If that span is under 5,000 characters, search for the heading `MANAGEMENT'S DISCUSSION AND ANALYSIS` (case-insensitive). Use the occurrence that is not in the table of contents and not the Item 7 cross-reference, and extract until the next major heading such as `QUANTITATIVE AND QUALITATIVE DISCLOSURES`, `REPORT OF INDEPENDENT REGISTERED PUBLIC ACCOUNTING FIRM`, or the start of the financial statements. If that span is at least 5,000 characters, store it as `item = mdna` with `extraction_method = heading`.
+   3. If both MD&A attempts are under 5,000 characters, or risk-factor extraction is under 5,000 characters, log the failure and store the full document text as `item = full_text` with `extraction_method = fallback`. `full_text` is only the last resort.
 6. Chunk by paragraph into roughly 1,200 characters with a small overlap.
 7. Risk headings: from the Risk Factors HTML, collect bold or italic paragraphs (`<b>`, `<strong>`, `font-weight:700|bold`, `font-style:italic`) between 40 and 400 characters. Store in order.
 

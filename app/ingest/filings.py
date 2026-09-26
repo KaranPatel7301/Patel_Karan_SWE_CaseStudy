@@ -21,6 +21,7 @@ MIN_SECTION_CHARS = 5_000
 CHUNK_TARGET = 1_200
 CHUNK_OVERLAP = 200
 EXTRACTION_REGEX = "regex"
+EXTRACTION_HEADING = "heading"
 EXTRACTION_FALLBACK = "fallback"
 
 _START_RISK = re.compile(r"(?im)^[ \t]{0,12}item\s+1a\b[\.\:\-\s]*risk\s+factors\b")
@@ -31,6 +32,19 @@ _START_MDNA = re.compile(
 )
 _END_MDNA = re.compile(r"(?im)^[ \t]{0,12}item\s+7a\b")
 _END_MDNA_FALLBACK = re.compile(r"(?im)^[ \t]{0,12}item\s+8\b")
+_HEADING_MDNA = re.compile(
+    r"(?im)^[ \t]{0,12}management(?:['\u2019]s)?\s+discussion\s+and\s+analysis\b"
+)
+_END_MDNA_MAJOR = re.compile(
+    r"(?im)^[ \t]{0,12}(?:"
+    r"quantitative\s+and\s+qualitative\s+disclosures\b|"
+    r"report\s+of\s+independent\s+registered\s+public\s+accounting\s+firm\b|"
+    r"consolidated\s+statements\s+of\s+income\b|"
+    r"consolidated\s+balance\s+sheets\b|"
+    r"(?:consolidated\s+)?financial\s+statements\b|"
+    r"item\s+8\b"
+    r")"
+)
 
 
 @dataclass(frozen=True)
@@ -108,31 +122,54 @@ def extract_sections(
     ticker: str = "",
     fiscal_year: int | None = None,
 ) -> list[ExtractedSection]:
-    """Keep the longest Item 1A and Item 7 span. Short spans fall back to the full document."""
+    """Extract Item 1A and MD&A. MD&A falls through to a heading match before full text."""
     label = ticker
     if fiscal_year is not None:
         label = f"{label} fy={fiscal_year}".strip()
     prefix = f"{label} " if label else ""
     sections: list[ExtractedSection] = []
     failed = False
-    for item, start, ends in (
-        ("risk_factors", _START_RISK, (_END_RISK, _END_RISK_FALLBACK)),
-        ("mdna", _START_MDNA, (_END_MDNA, _END_MDNA_FALLBACK)),
-    ):
-        span = _longest_span(text, start, ends)
-        length = 0 if span is None else len(span)
-        if span is None or length < MIN_SECTION_CHARS:
-            logger.warning(
-                "%s%s extraction failed (chars=%s, minimum=%s); using full document",
-                prefix,
-                item,
-                length,
-                MIN_SECTION_CHARS,
-            )
-            failed = True
-            continue
-        logger.info("%spicked %s span chars=%s method=%s", prefix, item, length, EXTRACTION_REGEX)
-        sections.append(ExtractedSection(item, span, EXTRACTION_REGEX))
+
+    risk = _longest_span(text, _START_RISK, (_END_RISK, _END_RISK_FALLBACK))
+    risk_length = 0 if risk is None else len(risk)
+    if risk is None or risk_length < MIN_SECTION_CHARS:
+        logger.warning(
+            "%srisk_factors extraction failed (chars=%s, minimum=%s); using full document",
+            prefix,
+            risk_length,
+            MIN_SECTION_CHARS,
+        )
+        failed = True
+    else:
+        logger.info(
+            "%spicked risk_factors span chars=%s method=%s",
+            prefix,
+            risk_length,
+            EXTRACTION_REGEX,
+        )
+        sections.append(ExtractedSection("risk_factors", risk, EXTRACTION_REGEX))
+
+    mdna = _extract_mdna(text)
+    if mdna is None:
+        item7 = _longest_span(text, _START_MDNA, (_END_MDNA, _END_MDNA_FALLBACK))
+        heading = _mdna_heading_span(text)
+        logger.warning(
+            "%smdna extraction failed (item7_chars=%s, heading_chars=%s, minimum=%s); using full document",
+            prefix,
+            0 if item7 is None else len(item7),
+            0 if heading is None else len(heading),
+            MIN_SECTION_CHARS,
+        )
+        failed = True
+    else:
+        logger.info(
+            "%spicked mdna span chars=%s method=%s",
+            prefix,
+            mdna.char_count,
+            mdna.extraction_method,
+        )
+        sections.append(mdna)
+
     if failed:
         sections.append(ExtractedSection("full_text", text, EXTRACTION_FALLBACK))
     return sections
@@ -311,6 +348,35 @@ def _print_section_report(session: Session, tickers: list[str]) -> None:
     for record in table:
         marker = " FALLBACK" if record[-1] == EXTRACTION_FALLBACK else ""
         print(" | ".join(record[index].ljust(widths[index]) for index in range(len(headers))) + marker)
+
+
+def _extract_mdna(text: str) -> ExtractedSection | None:
+    """Item 7 regex first, then a line-start MD&A heading, then give up."""
+    item7 = _longest_span(text, _START_MDNA, (_END_MDNA, _END_MDNA_FALLBACK))
+    if item7 is not None and len(item7) >= MIN_SECTION_CHARS:
+        return ExtractedSection("mdna", item7, EXTRACTION_REGEX)
+    heading = _mdna_heading_span(text)
+    if heading is not None and len(heading) >= MIN_SECTION_CHARS:
+        return ExtractedSection("mdna", heading, EXTRACTION_HEADING)
+    return None
+
+
+def _mdna_heading_span(text: str) -> str | None:
+    """Longest line-start MD&A heading, through the next major section or the document end.
+
+    The table of contents and the Item 7 cross-reference are short spans, so the
+    narrative heading wins. A quoted mention inside Item 7 does not start a line.
+    """
+    spans: list[str] = []
+    for match in _HEADING_MDNA.finditer(text):
+        end = _END_MDNA_MAJOR.search(text, match.end())
+        end_at = end.start() if end is not None else len(text)
+        if end_at <= match.start():
+            continue
+        spans.append(text[match.start() : end_at].strip())
+    if not spans:
+        return None
+    return max(spans, key=len)
 
 
 def _longest_span(text: str, start_re: re.Pattern[str], end_patterns: tuple[re.Pattern[str], ...]) -> str | None:
