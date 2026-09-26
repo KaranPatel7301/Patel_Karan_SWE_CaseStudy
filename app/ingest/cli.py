@@ -20,12 +20,17 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "filings":
         raise SystemExit("filings ingestion is not implemented yet")
     if args.command == "prices":
-        raise SystemExit("prices ingestion is not implemented yet")
+        from app.ingest.prices import ingest_prices
 
+        ingest_prices()
+        return
+
+    from app.ingest.prices import ingest_prices
     from app.ingest.xbrl import ingest_xbrl
 
     ingest_xbrl()
-    raise SystemExit("filings and prices ingestion are not implemented yet")
+    ingest_prices()
+    raise SystemExit("filings ingestion is not implemented yet")
 
 
 if __name__ == "__main__":

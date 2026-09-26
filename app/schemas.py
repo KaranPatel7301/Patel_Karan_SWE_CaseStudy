@@ -1,7 +1,13 @@
 from datetime import date
-from typing import Literal
+from decimal import Decimal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, PlainSerializer
+
+JsonDecimal = Annotated[
+    Decimal,
+    PlainSerializer(lambda value: float(value), return_type=float),
+]
 
 
 class RowCounts(BaseModel):
@@ -19,3 +25,97 @@ class HealthResponse(BaseModel):
     database: Literal["up", "down"]
     row_counts: RowCounts
     latest_price_date: date | None
+
+
+class CompanyOut(BaseModel):
+    ticker: str
+    cik: str
+    name: str
+
+
+class FundamentalFactOut(BaseModel):
+    concept: str
+    fiscal_year: int
+    period_start: date
+    period_end: date
+    value: JsonDecimal
+    unit: str
+    source_tag: str
+    accession: str
+    filed: date
+
+
+class FundamentalsResponse(BaseModel):
+    ticker: str
+    facts: list[FundamentalFactOut]
+
+
+class MetricValueOut(BaseModel):
+    value: float | None
+    reason: str | None
+
+
+class AnnualMetricsOut(BaseModel):
+    fiscal_year: int
+    period_end: date
+    gross_margin: MetricValueOut
+    operating_margin: MetricValueOut
+    net_margin: MetricValueOut
+    revenue_yoy: MetricValueOut
+    net_income_yoy: MetricValueOut
+    eps_yoy: MetricValueOut
+    free_cash_flow: MetricValueOut
+
+
+class MetricsResponse(BaseModel):
+    ticker: str
+    periods: list[AnnualMetricsOut]
+
+
+class ValuationMetricOut(BaseModel):
+    value: float | None
+    reason: str | None
+    fiscal_year: int | None
+    period_end: date | None
+
+
+class ValuationResponse(BaseModel):
+    ticker: str
+    price: JsonDecimal | None
+    price_date: date | None
+    trailing_pe: ValuationMetricOut
+    price_to_sales: ValuationMetricOut
+    shares_outstanding: JsonDecimal | None
+    shares_period_end: date | None
+
+
+class PriceOut(BaseModel):
+    date: date
+    close: JsonDecimal
+    adj_close: JsonDecimal
+    volume: int
+
+
+class PricesResponse(BaseModel):
+    ticker: str
+    prices: list[PriceOut]
+
+
+class CompareRowOut(BaseModel):
+    ticker: str
+    value: float
+    fiscal_year: int
+    period_end: date
+
+
+class UnavailableRowOut(BaseModel):
+    ticker: str
+    reason: str
+    fiscal_year: int | None
+    period_end: date | None
+
+
+class CompareResponse(BaseModel):
+    metric: str
+    ranked: list[CompareRowOut]
+    unavailable: list[UnavailableRowOut]
