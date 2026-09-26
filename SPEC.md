@@ -145,13 +145,13 @@ Concept map with tags in priority order:
 | revenue | RevenueFromContractWithCustomerExcludingAssessedTax, Revenues, SalesRevenueNet, RevenueFromContractWithCustomerIncludingAssessedTax |
 | cost_of_revenue | CostOfRevenue, CostOfGoodsAndServicesSold, CostOfGoodsSold |
 | gross_profit | GrossProfit (fallback: revenue minus cost_of_revenue) |
-| operating_income | OperatingIncomeLoss |
+| operating_income | OperatingIncomeLoss (do not derive when absent) |
 | net_income | NetIncomeLoss |
 | eps_diluted | EarningsPerShareDiluted |
 | eps_basic | EarningsPerShareBasic |
 | operating_cash_flow | NetCashProvidedByUsedInOperatingActivities |
-| capex | PaymentsToAcquirePropertyPlantAndEquipment |
-| shares_outstanding | dei:EntityCommonStockSharesOutstanding (point in time, no duration filter) |
+| capex | PaymentsToAcquirePropertyPlantAndEquipment, PaymentsToAcquireProductiveAssets |
+| shares_outstanding | dei:EntityCommonStockSharesOutstanding, us-gaap:CommonStockSharesOutstanding (point in time, no duration filter) |
 
 Rules:
 1. Keep only facts where `form == "10-K"`.

@@ -23,27 +23,41 @@ YEARS_TO_KEEP = 5
 DERIVED_GROSS_PROFIT_TAG = "derived:revenue-cost_of_revenue"
 CHECKPOINT_CONCEPTS = ("revenue", "net_income", "eps_diluted")
 
+@dataclass(frozen=True)
+class TagSpec:
+    taxonomy: str
+    tag: str
+
+
 # Tags are listed in priority order. Fallback is resolved per period_end.
-CONCEPT_TAGS: dict[str, tuple[str, ...]] = {
+CONCEPT_TAGS: dict[str, tuple[TagSpec, ...]] = {
     "revenue": (
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
-        "Revenues",
-        "SalesRevenueNet",
-        "RevenueFromContractWithCustomerIncludingAssessedTax",
+        TagSpec("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"),
+        TagSpec("us-gaap", "Revenues"),
+        TagSpec("us-gaap", "SalesRevenueNet"),
+        TagSpec("us-gaap", "RevenueFromContractWithCustomerIncludingAssessedTax"),
     ),
     "cost_of_revenue": (
-        "CostOfRevenue",
-        "CostOfGoodsAndServicesSold",
-        "CostOfGoodsSold",
+        TagSpec("us-gaap", "CostOfRevenue"),
+        TagSpec("us-gaap", "CostOfGoodsAndServicesSold"),
+        TagSpec("us-gaap", "CostOfGoodsSold"),
     ),
-    "gross_profit": ("GrossProfit",),
-    "operating_income": ("OperatingIncomeLoss",),
-    "net_income": ("NetIncomeLoss",),
-    "eps_diluted": ("EarningsPerShareDiluted",),
-    "eps_basic": ("EarningsPerShareBasic",),
-    "operating_cash_flow": ("NetCashProvidedByUsedInOperatingActivities",),
-    "capex": ("PaymentsToAcquirePropertyPlantAndEquipment",),
-    "shares_outstanding": ("EntityCommonStockSharesOutstanding",),
+    "gross_profit": (TagSpec("us-gaap", "GrossProfit"),),
+    "operating_income": (TagSpec("us-gaap", "OperatingIncomeLoss"),),
+    "net_income": (TagSpec("us-gaap", "NetIncomeLoss"),),
+    "eps_diluted": (TagSpec("us-gaap", "EarningsPerShareDiluted"),),
+    "eps_basic": (TagSpec("us-gaap", "EarningsPerShareBasic"),),
+    "operating_cash_flow": (
+        TagSpec("us-gaap", "NetCashProvidedByUsedInOperatingActivities"),
+    ),
+    "capex": (
+        TagSpec("us-gaap", "PaymentsToAcquirePropertyPlantAndEquipment"),
+        TagSpec("us-gaap", "PaymentsToAcquireProductiveAssets"),
+    ),
+    "shares_outstanding": (
+        TagSpec("dei", "EntityCommonStockSharesOutstanding"),
+        TagSpec("us-gaap", "CommonStockSharesOutstanding"),
+    ),
 }
 
 CONCEPT_UNITS: dict[str, str] = {
@@ -59,11 +73,6 @@ CONCEPT_UNITS: dict[str, str] = {
     "shares_outstanding": "shares",
 }
 
-# shares_outstanding is a cover-page instant fact in the dei taxonomy.
-CONCEPT_TAXONOMY: dict[str, str] = {
-    concept: "dei" if concept == "shares_outstanding" else "us-gaap"
-    for concept in CONCEPT_TAGS
-}
 
 
 @dataclass(frozen=True)
@@ -215,20 +224,32 @@ def print_checkpoint(session: Session, tickers: list[str]) -> None:
 def _select_concept(
     ticker: str,
     concept: str,
-    tags: tuple[str, ...],
+    tags: tuple[TagSpec, ...],
     payload: dict,
 ) -> list[_Candidate]:
-    taxonomy = CONCEPT_TAXONOMY[concept]
     unit = CONCEPT_UNITS[concept]
     point_in_time = concept == "shares_outstanding"
     candidates: list[_Candidate] = []
-    for priority, tag in enumerate(tags):
-        raw_facts = _raw_facts(payload, taxonomy, tag, unit)
+    for priority, spec in enumerate(tags):
+        raw_facts = _raw_facts(payload, spec.taxonomy, spec.tag, unit)
         if raw_facts is None:
-            logger.info("%s %s: tag %s not present in companyfacts", ticker, concept, tag)
+            logger.info(
+                "%s %s: tag %s:%s not present in companyfacts",
+                ticker,
+                concept,
+                spec.taxonomy,
+                spec.tag,
+            )
             continue
         for raw in raw_facts:
-            parsed = _parse_fact(raw, priority, tag, unit, point_in_time=point_in_time)
+            parsed = _parse_fact(
+                raw,
+                priority,
+                spec.taxonomy,
+                spec.tag,
+                unit,
+                point_in_time=point_in_time,
+            )
             if parsed is not None:
                 candidates.append(parsed)
     return _pick_by_period(ticker, concept, candidates)
@@ -254,9 +275,16 @@ def _raw_facts(payload: dict, taxonomy: str, tag: str, unit: str) -> list[dict] 
     return [row for row in rows if isinstance(row, dict)]
 
 
+def _source_tag(taxonomy: str, tag: str) -> str:
+    if taxonomy == "dei" or tag == "CommonStockSharesOutstanding":
+        return f"{taxonomy}:{tag}"
+    return tag
+
+
 def _parse_fact(
     raw: dict,
     priority: int,
+    taxonomy: str,
     tag: str,
     unit: str,
     *,
@@ -285,7 +313,7 @@ def _parse_fact(
         duration_days = (period_end - period_start).days
         if not ANNUAL_MIN_DAYS <= duration_days <= ANNUAL_MAX_DAYS:
             return None
-    source_tag = f"dei:{tag}" if tag == "EntityCommonStockSharesOutstanding" else tag
+    source_tag = _source_tag(taxonomy, tag)
     return _Candidate(
         priority=priority,
         source_tag=source_tag,

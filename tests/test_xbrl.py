@@ -383,3 +383,133 @@ def test_shares_outstanding_ignores_duration_filter() -> None:
     assert shares[0].source_tag == "dei:EntityCommonStockSharesOutstanding"
     assert shares[0].unit == "shares"
     assert shares[0].fiscal_year == 2024
+
+
+def test_shares_fallback_uses_us_gaap_when_dei_tag_is_absent() -> None:
+    payload = _payload(
+        {
+            "CommonStockSharesOutstanding": {
+                "units": {
+                    "shares": [
+                        _fact(start=None, end="2025-12-31", val=12088000000, filed="2026-02-05"),
+                    ]
+                }
+            }
+        }
+    )
+    shares = [
+        fact
+        for fact in normalize_companyfacts("TEST", payload)
+        if fact.concept == "shares_outstanding"
+    ]
+    assert len(shares) == 1
+    assert shares[0].value == Decimal("12088000000")
+    assert shares[0].source_tag == "us-gaap:CommonStockSharesOutstanding"
+    assert shares[0].period_start == dt.date(2025, 12, 31)
+
+
+def test_dei_shares_tag_wins_when_both_exist_for_the_period() -> None:
+    payload = _payload(
+        {
+            "CommonStockSharesOutstanding": {
+                "units": {
+                    "shares": [
+                        _fact(
+                            start=None,
+                            end="2025-12-31",
+                            val=999,
+                            filed="2026-02-05",
+                            accn="0000000000-26-000002",
+                        ),
+                    ]
+                }
+            }
+        },
+        dei={
+            "EntityCommonStockSharesOutstanding": {
+                "units": {
+                    "shares": [
+                        _fact(
+                            start=None,
+                            end="2025-12-31",
+                            val=12088000000,
+                            filed="2025-02-05",
+                            accn="0000000000-25-000001",
+                        ),
+                    ]
+                }
+            }
+        },
+    )
+    fact = _one(
+        normalize_companyfacts("TEST", payload),
+        "shares_outstanding",
+        dt.date(2025, 12, 31),
+    )
+    assert fact.value == Decimal("12088000000")
+    assert fact.source_tag == "dei:EntityCommonStockSharesOutstanding"
+
+
+def test_capex_falls_back_to_payments_to_acquire_productive_assets() -> None:
+    payload = _payload(
+        _usd(
+            "PaymentsToAcquireProductiveAssets",
+            [
+                _fact(
+                    start="2025-01-27",
+                    end="2026-01-25",
+                    val=6042000000,
+                    filed="2026-02-25",
+                )
+            ],
+        )
+    )
+    fact = _one(normalize_companyfacts("TEST", payload), "capex", dt.date(2026, 1, 25))
+    assert fact.value == Decimal("6042000000")
+    assert fact.source_tag == "PaymentsToAcquireProductiveAssets"
+
+
+def test_capex_prefers_property_plant_tag_when_both_exist() -> None:
+    us_gaap: dict = {}
+    us_gaap.update(
+        _usd(
+            "PaymentsToAcquirePropertyPlantAndEquipment",
+            [
+                _fact(
+                    start="2025-01-01",
+                    end="2025-12-31",
+                    val=100,
+                    filed="2026-02-01",
+                    accn="0000000000-26-000001",
+                )
+            ],
+        )
+    )
+    us_gaap.update(
+        _usd(
+            "PaymentsToAcquireProductiveAssets",
+            [
+                _fact(
+                    start="2025-01-01",
+                    end="2025-12-31",
+                    val=999,
+                    filed="2026-03-01",
+                    accn="0000000000-26-000002",
+                )
+            ],
+        )
+    )
+    fact = _one(normalize_companyfacts("TEST", _payload(us_gaap)), "capex", dt.date(2025, 12, 31))
+    assert fact.value == Decimal("100")
+    assert fact.source_tag == "PaymentsToAcquirePropertyPlantAndEquipment"
+
+
+def test_operating_income_is_not_derived_when_tag_is_absent() -> None:
+    payload = _payload(
+        _usd(
+            "Revenues",
+            [_fact(start="2025-01-01", end="2025-12-31", val=100, filed="2026-02-01")],
+        )
+    )
+    concepts = {fact.concept for fact in normalize_companyfacts("TEST", payload)}
+    assert "operating_income" not in concepts
