@@ -27,6 +27,17 @@ from app.services.search import search_chunks
 
 FACT_CONCEPTS: tuple[str, ...] = tuple(CONCEPT_TAGS)
 FINANCIAL_METRICS: tuple[str, ...] = FACT_CONCEPTS + ANNUAL_METRICS
+_RATIO_METRICS = frozenset(
+    {
+        "gross_margin",
+        "operating_margin",
+        "net_margin",
+        "revenue_yoy",
+        "net_income_yoy",
+        "eps_yoy",
+    }
+)
+_MULTIPLE_METRICS = frozenset({"trailing_pe", "price_to_sales"})
 SEARCH_ITEMS = ("risk_factors", "mdna", "any")
 FILING_CHOICES = ("latest", "prior", "any")
 
@@ -269,6 +280,7 @@ def _compare_companies(args: dict[str, Any]) -> dict[str, Any]:
             {
                 "ticker": row.ticker,
                 "value": row.value,
+                "formatted": _format_metric(parsed.metric, row.value),
                 "fiscal_year": row.fiscal_year,
                 "period_end": None if row.period_end is None else row.period_end.isoformat(),
                 "source": {
@@ -314,11 +326,17 @@ def _get_valuation(args: dict[str, Any]) -> dict[str, Any]:
     return {
         "ticker": company.ticker,
         "price": None if result.price is None else float(result.price),
+        "price_formatted": None if result.price is None else _format_dollars(float(result.price)),
         "price_date": None if result.price_date is None else result.price_date.isoformat(),
-        "trailing_pe": _valuation_field(result.trailing_pe),
-        "price_to_sales": _valuation_field(result.price_to_sales),
+        "trailing_pe": _valuation_field(result.trailing_pe, "trailing_pe"),
+        "price_to_sales": _valuation_field(result.price_to_sales, "price_to_sales"),
         "shares_outstanding": (
             None if result.shares_outstanding is None else float(result.shares_outstanding)
+        ),
+        "shares_formatted": (
+            None
+            if result.shares_outstanding is None
+            else _format_count(float(result.shares_outstanding))
         ),
         "shares_period_end": (
             None if result.shares_period_end is None else result.shares_period_end.isoformat()
@@ -456,6 +474,7 @@ def _recent_facts(
                     "fiscal_year": row.fiscal_year,
                     "period_end": row.period_end.isoformat(),
                     "value": float(row.value),
+                    "formatted": _format_fact(float(row.value), row.unit),
                     "unit": row.unit,
                     "source_tag": row.source_tag,
                     "source": {
@@ -480,17 +499,68 @@ def _metric_rows(facts: list[Fact], names: list[str], years: int) -> list[dict[s
         for name in names:
             metric = getattr(period, name)
             entry[name] = {"value": metric.value, "reason": metric.reason}
+            formatted = _format_metric(name, metric.value)
+            if formatted is not None:
+                entry[name]["formatted"] = formatted
         rows.append(entry)
     return rows
 
 
-def _valuation_field(metric: ValuationMetric) -> dict[str, Any]:
-    return {
+def _valuation_field(metric: ValuationMetric, name: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "value": metric.value,
         "reason": metric.reason,
         "fiscal_year": metric.fiscal_year,
         "period_end": None if metric.period_end is None else metric.period_end.isoformat(),
     }
+    formatted = _format_metric(name, metric.value)
+    if formatted is not None:
+        payload["formatted"] = formatted
+    return payload
+
+
+def _format_percent(value: float) -> str:
+    return f"{value * 100:.1f}%"
+
+
+def _format_dollars(value: float) -> str:
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+    if magnitude >= 1_000_000_000:
+        return f"{sign}${magnitude / 1_000_000_000:.1f}B"
+    if magnitude >= 1_000_000:
+        return f"{sign}${magnitude / 1_000_000:.1f}M"
+    return f"{sign}${magnitude:,.2f}"
+
+
+def _format_count(value: float) -> str:
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+    if magnitude >= 1_000_000_000:
+        return f"{sign}{magnitude / 1_000_000_000:.1f}B"
+    if magnitude >= 1_000_000:
+        return f"{sign}{magnitude / 1_000_000:.1f}M"
+    return f"{value:,.0f}"
+
+
+def _format_fact(value: float, unit: str) -> str:
+    if unit == "USD":
+        return _format_dollars(value)
+    if unit == "USD/shares":
+        return f"${value:.2f}"
+    return _format_count(value)
+
+
+def _format_metric(name: str, value: float | None) -> str | None:
+    if value is None:
+        return None
+    if name in _RATIO_METRICS:
+        return _format_percent(value)
+    if name == "free_cash_flow":
+        return _format_dollars(value)
+    if name in _MULTIPLE_METRICS:
+        return f"{value:.1f}x"
+    return None
 
 
 def _price_citation(

@@ -100,6 +100,8 @@ docker compose up -d --force-recreate api
 
 Start fresh. `docker compose down -v` deletes the database volume. The next `docker compose up -d --build` loads `seed/seed.sql.gz` again.
 
+Seed doesn't load (health shows zero rows). On Colima, only your home directory is shared with Docker by default. Clone under your home folder, not /tmp, then docker compose down -v and start again.
+
 ## Model
 
 Answers are produced with Google AI Studio, model `gemini-3.8-flash`, through the OpenAI-compatible endpoint `https://generativelanguage.googleapis.com/v1beta/openai/`.
@@ -194,7 +196,7 @@ curl -sS http://127.0.0.1:8000/ask \
 
 ```json
 {
-  "answer": "For the fiscal year ended June 30, 2026 (period_end: 2026-06-30), Microsoft's revenue and revenue growth were as follows:\n\n**Computed Numbers / Reported Facts:**\n- Fiscal Year 2026 Revenue: $331,839,000,000 (period_end: 2026-06-30), compared to $281,724,000,000 for Fiscal Year 2025 (period_end: 2025-06-30).\n- Revenue YoY Growth: 0.1778868679984666 (or approximately 17.79% / 18%).\n\n**Management Explanation (MD&A Excerpt):**\nAccording to Microsoft's MD&A in the latest Form 10-K (chunk_id: 9218):\n\"Revenue increased $50.1 billion or 18% driven by growth in Microsoft Cloud. Intelligent Cloud revenue increased driven by Azure. Productivity and Business Processes revenue increased driven by Microsoft 365 Commercial cloud. More Personal Computing revenue decreased driven by XBOX (formerly Gaming), offset in part by growth in Search advertising.\"",
+  "answer": "**Computed Numbers:**\n- For the fiscal year ended 2026-06-30, Microsoft's revenue was $331.8B (compared to $281.7B for the fiscal year ended 2025-06-30), resulting in year-over-year revenue growth of 17.8%.\n\n**MD&A Excerpt (Management's Explanation):**\n- According to Microsoft's Item 7 (MD&A) in the 2026 10-K:\n  \"Revenue increased $50.1 billion or 18% driven by growth in Microsoft Cloud. Intelligent Cloud revenue increased driven by Azure. Productivity and Business Processes revenue increased driven by Microsoft 365 Commercial cloud. More Personal Computing revenue decreased driven by XBOX (formerly Gaming), offset in part by growth in Search advertising.\"",
   "declined": false,
   "data_used": "both",
   "sources": [
@@ -204,7 +206,7 @@ curl -sS http://127.0.0.1:8000/ask \
   ],
   "tool_trace": [
     {"tool": "get_financials", "args": {"ticker": "MSFT", "metrics": ["revenue", "revenue_yoy"], "years": 2}, "ok": true},
-    {"tool": "search_filings", "args": {"ticker": "MSFT", "item": "mdna", "k": 5, "filing": "latest", "query": "revenue increased Intelligent Cloud Productivity and Business Processes"}, "ok": true},
+    {"tool": "search_filings", "args": {"ticker": "MSFT", "item": "mdna", "filing": "latest", "query": "revenue increased driven by"}, "ok": true},
     {"tool": "final_answer", "args": {"declined": false, "data_used": "both"}, "ok": true}
   ]
 }
