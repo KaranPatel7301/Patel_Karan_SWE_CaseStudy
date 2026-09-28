@@ -1,5 +1,23 @@
 # Fundamentals Tracker
 
+A FastAPI service that tracks five companies from SEC filings and Yahoo prices stored in Postgres, and answers natural-language questions over both the numbers and the filing text. Ingestion fills the database. A request, including `/ask`, only reads that snapshot.
+
+Design writeup: [DESIGN.md](DESIGN.md)
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/health` | Database status, row counts, latest price date |
+| GET | `/companies` | Configured tickers |
+| GET | `/companies/{ticker}/fundamentals?years=` | Reported annual facts |
+| GET | `/companies/{ticker}/metrics?years=` | Margins, growth, free cash flow |
+| GET | `/companies/{ticker}/valuation` | Trailing P/E, price to sales, price and as-of date |
+| GET | `/companies/{ticker}/prices?start=&end=` | Daily prices |
+| GET | `/companies/{ticker}/filings/search?q=&item=&fiscal_year=` | Ranked 10-K chunks |
+| GET | `/compare?metric=` | One metric ranked across the five companies |
+| POST | `/ask` | Agent answer, citations, and tool trace |
+
+With the stack running, FastAPI lists every endpoint at [http://localhost:8000/docs](http://localhost:8000/docs).
+
 ## Setup
 
 `.env` is gitignored. A fresh clone has `.env.example` only.
@@ -107,6 +125,14 @@ docker compose exec -T api python scripts/verify_against_yahoo.py
 ```
 
 The script calls Yahoo. It is a check after ingestion, not part of serving.
+
+## Tests
+
+The API container has to be running. `make test` runs pytest inside it.
+
+```bash
+make test
+```
 
 ## Examples
 
