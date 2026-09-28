@@ -3,7 +3,7 @@ import logging
 from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from openai import APIStatusError
+from openai import APIConnectionError, APIStatusError
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -258,6 +258,12 @@ def ask(body: AskRequest) -> AskResponse:
     except APIStatusError as exc:
         logger.error("LLM request failed: %s", exc)
         raise HTTPException(status_code=502, detail=_llm_error_detail(exc)) from exc
+    except APIConnectionError as exc:
+        logger.error("LLM endpoint unreachable: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Could not reach the LLM endpoint. Check LLM_BASE_URL.",
+        ) from exc
 
 
 @router.get("/compare", response_model=CompareResponse)
